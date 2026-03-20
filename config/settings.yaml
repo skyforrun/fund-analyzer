@@ -1,0 +1,51 @@
+database:
+  host: localhost
+  port: 5432
+  name: fund_analyzer
+  user: postgres
+  password: "postgres"
+
+data:
+  sync_interval_seconds: 0.5
+  retry_count: 3
+  fund_pool:
+    min_inception_years: 2
+    min_size_billion: 1
+    exclude_types: ["货币型", "纯债型"]
+
+portfolio:
+  core_ratio: 30
+  satellite_ratio: 70
+
+strategy:
+  dynamic_weights: false
+  signal_thresholds:
+    buy: 80
+    sell: 60
+  core:
+    factor: 70
+    global_alloc: 30
+  satellite:
+    momentum: 40
+    rotation: 35
+    global_alloc: 25
+
+backtest:
+  default_start: "2020-01-01"
+  initial_capital: 100000
+  core_top_n: 3
+  satellite_top_n: 7
+  core_rebalance_freq: quarterly
+  satellite_rebalance_freq: monthly
+  buy_fee_rate: 0.0015
+  sell_fee_rate: 0.005
+
+smart_dip:
+  low_pe_percentile: 30
+  high_pe_percentile: 70
+  low_multiplier: 1.5
+  high_multiplier: 0.5
+
+logging:
+  level: INFO
+  file: logs/fund_analyzer.log
