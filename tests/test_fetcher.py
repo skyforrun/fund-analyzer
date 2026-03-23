@@ -34,11 +34,15 @@ class TestFetchFundList:
 
     @patch("fund_analyzer.data.fetcher.ak")
     def test_fetch_fund_list_returns_list_of_dicts(self, mock_ak):
-        """正常情况：返回包含 fund_code / fund_name 的字典列表。"""
-        mock_ak.fund_open_fund_info_em.return_value = pd.DataFrame(
+        """正常情况：返回包含 fund_code / fund_name 的字典列表。
+
+        fetcher 内部调用 ak.fund_name_em，返回 DataFrame 中
+        第0列为基金代码，第2列为基金名称，第3列为基金类型。
+        """
+        mock_ak.fund_name_em.return_value = pd.DataFrame(
             [
-                ["110011", "易方达蓝筹精选"],
-                ["000001", "华夏成长"],
+                ["110011", "SH", "易方达蓝筹精选", "股票型"],
+                ["000001", "SH", "华夏成长", "混合型"],
             ]
         )
         fetcher = _make_fetcher()
@@ -53,7 +57,7 @@ class TestFetchFundList:
     @patch("fund_analyzer.data.fetcher.ak")
     def test_fetch_fund_list_empty_df_returns_empty_list(self, mock_ak):
         """akshare 返回空 DataFrame 时，fetch_fund_list 返回空列表。"""
-        mock_ak.fund_open_fund_info_em.return_value = pd.DataFrame()
+        mock_ak.fund_name_em.return_value = pd.DataFrame()
         fetcher = _make_fetcher()
         result = fetcher.fetch_fund_list()
         assert result == []
@@ -61,7 +65,7 @@ class TestFetchFundList:
     @patch("fund_analyzer.data.fetcher.ak")
     def test_fetch_fund_list_exception_returns_empty_list(self, mock_ak):
         """akshare 抛出异常时，fetch_fund_list 返回空列表而非抛出。"""
-        mock_ak.fund_open_fund_info_em.side_effect = RuntimeError("网络错误")
+        mock_ak.fund_name_em.side_effect = RuntimeError("网络错误")
         fetcher = _make_fetcher()
         result = fetcher.fetch_fund_list()
         assert result == []

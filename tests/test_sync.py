@@ -361,7 +361,7 @@ class TestSyncAll:
 
         result = syncer.sync_all()
 
-        assert set(result.keys()) == {"funds", "navs", "indices", "warnings"}
+        assert set(result.keys()) == {"funds", "navs", "indices", "estimates", "fee_schedules", "warnings"}
 
     def test_sync_all_with_specified_fund_codes(
         self,

@@ -81,7 +81,7 @@ class MomentumStrategy(BaseStrategy):
         if len(nav_records) < 20:
             return None
 
-        acc_navs = [r.acc_nav for r in nav_records]
+        acc_navs = [r.acc_nav if r.acc_nav is not None else r.nav for r in nav_records]
         n = len(acc_navs)
 
         # 计算各窗口动量

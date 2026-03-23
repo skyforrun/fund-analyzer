@@ -67,6 +67,7 @@ def _build_mock_repo(
     """
     repo = MagicMock()
     repo.get_index_quote.return_value = benchmark_records
+    repo.get_fee_rate.return_value = None  # 无费率表数据时，回退到引擎默认费率
 
     def _mock_get_fund_nav(fund_code: str, start: date, end: date):
         records = fund_records_map.get(fund_code, [])

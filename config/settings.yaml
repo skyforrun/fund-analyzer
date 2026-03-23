@@ -46,6 +46,21 @@ smart_dip:
   low_multiplier: 1.5
   high_multiplier: 0.5
 
+schedule:
+  enabled: true
+  sync_time: "21:00"
+  max_nav_funds: 200
+
 logging:
   level: INFO
   file: logs/fund_analyzer.log
+
+email:
+  enabled: true
+  smtp_host: "smtp.163.com"
+  smtp_port: 465
+  smtp_user: "18717121440@163.com"
+  smtp_password: "UEfHVvSYCgxiJhz3"
+  receiver: "18717121440@163.com"
+  send_time: "14:40"
+  use_ssl: true

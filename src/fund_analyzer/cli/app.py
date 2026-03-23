@@ -161,11 +161,15 @@ data_app = typer.Typer(name="data", help="数据管理")
 portfolio_app = typer.Typer(name="portfolio", help="组合管理")
 dip_app = typer.Typer(name="dip", help="定投管理")
 config_app = typer.Typer(name="config", help="配置管理")
+watchlist_app = typer.Typer(name="watchlist", help="自选基金管理")
+notify_app = typer.Typer(name="notify", help="通知管理")
 
 app.add_typer(data_app)
 app.add_typer(portfolio_app)
 app.add_typer(dip_app)
 app.add_typer(config_app)
+app.add_typer(watchlist_app)
+app.add_typer(notify_app)
 
 # -----------------------------------------------------------------------
 # config 命令组
@@ -506,6 +510,211 @@ def dip_check():
 
     console.print(table)
     console.print(f"[bold]共 {len(due_plans)} 条计划今日应执行。[/bold]")
+
+
+# -----------------------------------------------------------------------
+# watchlist 命令组
+# -----------------------------------------------------------------------
+
+
+@watchlist_app.command("add")
+def watchlist_add(
+    code: str = typer.Argument(..., help="基金代码"),
+    group: str = typer.Option("默认", "--group", "-g", help="分组名称"),
+):
+    """添加基金到自选列表。"""
+    session = _get_session()
+    repo = _get_repo(session)
+    fund_info = repo.get_fund_info(code)
+    fund_name = fund_info.fund_name if fund_info else ""
+    repo.add_to_watchlist(code, fund_name, group)
+    session.commit()
+    console.print(f"[green]已添加 {code} ({fund_name}) 到分组「{group}」[/green]")
+
+
+@watchlist_app.command("list")
+def watchlist_list(
+    group: str = typer.Option(None, "--group", "-g", help="按分组过滤"),
+):
+    """显示自选列表。"""
+    session = _get_session()
+    repo = _get_repo(session)
+    items = repo.get_watchlist(group_name=group)
+    if not items:
+        console.print("[yellow]自选列表为空[/yellow]")
+        return
+    from rich.table import Table
+    table = Table(title="自选基金")
+    table.add_column("代码")
+    table.add_column("名称")
+    table.add_column("分组")
+    table.add_column("备注")
+    for item in items:
+        table.add_row(item.fund_code, item.fund_name or "-", item.group_name, item.notes or "")
+    console.print(table)
+
+
+@watchlist_app.command("remove")
+def watchlist_remove(
+    code: str = typer.Argument(..., help="基金代码"),
+):
+    """从自选列表移除基金。"""
+    session = _get_session()
+    repo = _get_repo(session)
+    count = repo.remove_from_watchlist(code)
+    session.commit()
+    if count > 0:
+        console.print(f"[green]已移除 {code}（{count}条记录）[/green]")
+    else:
+        console.print(f"[yellow]未找到 {code} 的自选记录[/yellow]")
+
+
+# -----------------------------------------------------------------------
+# notify 命令组
+# -----------------------------------------------------------------------
+
+
+@notify_app.command("test")
+def notify_test():
+    """发送测试通知。"""
+    session = _get_session()
+    repo = _get_repo(session)
+    config = repo.get_notification_config()
+    if not config or not config.webhook_url:
+        console.print("[red]未配置通知 Webhook URL[/red]")
+        raise typer.Exit(code=1)
+
+    from fund_analyzer.notification.sender import WeChatSender
+    sender = WeChatSender(config.webhook_url)
+    if sender.test():
+        console.print("[green]测试消息发送成功！[/green]")
+    else:
+        console.print("[red]测试消息发送失败[/red]")
+
+
+@notify_app.command("check")
+def notify_check():
+    """执行通知规则检查。"""
+    session = _get_session()
+    repo = _get_repo(session)
+    config = repo.get_notification_config()
+    if not config or not config.webhook_url:
+        console.print("[red]未配置通知 Webhook URL[/red]")
+        raise typer.Exit(code=1)
+
+    from fund_analyzer.notification.sender import WeChatSender
+    from fund_analyzer.notification.checker import NotificationChecker
+    sender = WeChatSender(config.webhook_url)
+    checker = NotificationChecker(repo, sender)
+    results = checker.check_all()
+
+    for rule_type, count in results.items():
+        console.print(f"  {rule_type}: 推送 {count} 条")
+    console.print("[green]通知检查完成[/green]")
+
+
+@notify_app.command("test-email")
+def notify_test_email():
+    """发送测试邮件，验证 SMTP 配置。"""
+    settings = _load_settings()
+    if not settings.email.enabled:
+        console.print("[red]邮件推送未启用，请检查 settings.yaml 中 email.enabled[/red]")
+        raise typer.Exit(code=1)
+
+    from fund_analyzer.notification.email_sender import EmailSender
+    sender = EmailSender(settings.email)
+    if sender.test():
+        console.print("[green]测试邮件发送成功！[/green]")
+    else:
+        console.print("[red]测试邮件发送失败，请检查 SMTP 配置[/red]")
+
+
+@notify_app.command("send-email")
+def notify_send_email(
+    dry_run: bool = typer.Option(False, "--dry-run", help="仅生成推荐，不发送邮件"),
+):
+    """手动触发加仓建议邮件推送。"""
+    from datetime import date as _date
+
+    settings = _load_settings()
+    if not settings.email.enabled and not dry_run:
+        console.print("[red]邮件推送未启用，请检查 settings.yaml 中 email.enabled[/red]")
+        raise typer.Exit(code=1)
+
+    session = _get_session(settings)
+    repo = _get_repo(session)
+
+    from fund_analyzer.strategy.factor import FactorStrategy
+    from fund_analyzer.strategy.momentum import MomentumStrategy
+    from fund_analyzer.strategy.rotation import RotationStrategy
+    from fund_analyzer.strategy.global_alloc import GlobalAllocStrategy
+    from fund_analyzer.strategy.composite import CompositeStrategy
+    from fund_analyzer.notification.recommendation import RecommendationService
+
+    strategies = {
+        "factor": FactorStrategy(repo),
+        "momentum": MomentumStrategy(repo),
+        "rotation": RotationStrategy(repo),
+        "global_alloc": GlobalAllocStrategy(repo),
+    }
+    composite = CompositeStrategy(
+        strategies=strategies,
+        core_weights=settings.strategy.core,
+        satellite_weights=settings.strategy.satellite,
+        buy_threshold=settings.strategy.signal_thresholds.buy,
+        sell_threshold=settings.strategy.signal_thresholds.sell,
+    )
+
+    service = RecommendationService(
+        repo=repo,
+        composite=composite,
+        buy_threshold=settings.strategy.signal_thresholds.buy,
+        sell_threshold=settings.strategy.signal_thresholds.sell,
+    )
+    recommendations = service.generate_recommendations()
+
+    # 显示推荐结果到终端
+    if not recommendations:
+        console.print("[dim]今日无加仓建议。[/dim]")
+    else:
+        table = Table(
+            title=f"加仓建议 ({_date.today()})",
+            show_header=True,
+            header_style="bold green",
+        )
+        table.add_column("代码", style="dim")
+        table.add_column("名称")
+        table.add_column("评分", justify="right")
+        table.add_column("置信度", justify="right")
+        table.add_column("估值", justify="right")
+        table.add_column("涨跌幅", justify="right")
+        table.add_column("仓位")
+
+        for rec in recommendations:
+            est_nav = f"{rec.estimate_nav:.4f}" if rec.estimate_nav else "N/A"
+            est_ret = f"{rec.estimate_return:+.2f}%" if rec.estimate_return is not None else "N/A"
+            table.add_row(
+                rec.fund_code,
+                rec.fund_name,
+                f"{rec.score:.1f}",
+                f"{rec.signal.confidence:.0%}",
+                est_nav,
+                est_ret,
+                rec.position_type,
+            )
+        console.print(table)
+
+    if dry_run:
+        console.print("[yellow]Dry run 模式，不发送邮件。[/yellow]")
+        return
+
+    html = service.render_html(recommendations)
+    from fund_analyzer.notification.email_sender import EmailSender
+    sender = EmailSender(settings.email)
+    if sender.send(f"基金加仓建议 - {_date.today()}", html):
+        console.print("[green]邮件发送成功！[/green]")
+    else:
+        console.print("[red]邮件发送失败[/red]")
 
 
 # -----------------------------------------------------------------------

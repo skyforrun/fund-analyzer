@@ -75,9 +75,34 @@ class SmartDipConfig:
 
 
 @dataclass
+class EstimateConfig:
+    primary_source: str = "akshare"
+    fallback_enabled: bool = True
+
+
+@dataclass
+class ScheduleConfig:
+    enabled: bool = True
+    sync_time: str = "21:00"
+    max_nav_funds: int = 200
+
+
+@dataclass
 class LoggingConfig:
     level: str = "INFO"
     file: str = "logs/fund_analyzer.log"
+
+
+@dataclass
+class EmailConfig:
+    enabled: bool = False
+    smtp_host: str = "smtp.163.com"
+    smtp_port: int = 465
+    smtp_user: str = ""
+    smtp_password: str = ""
+    receiver: str = ""
+    send_time: str = "14:40"
+    use_ssl: bool = True
 
 
 @dataclass
@@ -88,7 +113,10 @@ class Settings:
     strategy: StrategyConfig = field(default_factory=StrategyConfig)
     backtest: BacktestConfig = field(default_factory=BacktestConfig)
     smart_dip: SmartDipConfig = field(default_factory=SmartDipConfig)
+    estimate: EstimateConfig = field(default_factory=EstimateConfig)
+    schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    email: EmailConfig = field(default_factory=EmailConfig)
 
 
 def _dict_to_dataclass(cls, data: dict):
@@ -122,4 +150,17 @@ def load_config(path: str) -> Settings:
     if env_password and not settings.database.password:
         settings.database.password = env_password
 
+    env_email_pwd = os.environ.get("FUND_EMAIL_PASSWORD")
+    if env_email_pwd and not settings.email.smtp_password:
+        settings.email.smtp_password = env_email_pwd
+
     return settings
+
+
+def save_config(path: str, settings: Settings) -> None:
+    """将 Settings 写回 YAML 文件。"""
+    from dataclasses import asdict
+    config_path = Path(path)
+    data = asdict(settings)
+    with open(config_path, "w", encoding="utf-8") as f:
+        yaml.dump(data, f, allow_unicode=True, default_flow_style=False)

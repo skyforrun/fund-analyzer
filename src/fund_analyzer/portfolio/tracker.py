@@ -132,6 +132,9 @@ class PortfolioTracker:
             pnl = market_value - cost
             return_pct = (pnl / cost * Decimal("100")) if cost != Decimal("0") else None
 
+            buy_date_val = pos.buy_date if hasattr(pos, "buy_date") else None
+            holding_days = (as_of - buy_date_val).days if buy_date_val else 0
+
             holdings.append({
                 "fund_code": fund_code,
                 "position_type": position_type,
@@ -142,6 +145,8 @@ class PortfolioTracker:
                 "cost": cost,
                 "pnl": pnl,
                 "return_pct": return_pct,
+                "buy_date": buy_date_val,
+                "holding_days": holding_days,
             })
 
             total_market_value += market_value

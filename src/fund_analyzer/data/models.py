@@ -1,6 +1,6 @@
 """SQLAlchemy 2.0 ORM 数据模型定义。
 
-共9张表：
+共16张表：
     fund_info            — 基金基本信息
     fund_nav             — 基金净值
     index_quote          — 指数行情
@@ -10,6 +10,13 @@
     portfolio_transaction — 组合交易记录
     strategy_signal      — 策略信号
     dip_plan             — 定投计划
+    fund_estimate        — 基金实时估值
+    fund_watchlist       — 自选关注列表
+    notification_config  — 通知渠道配置
+    notification_rule    — 通知规则
+    fund_dividend        — 基金分红记录
+    fund_fee_schedule    — 基金费率阶梯表
+    risk_profile         — 风险评估记录
 """
 from __future__ import annotations
 
@@ -23,6 +30,7 @@ from sqlalchemy import (
     DateTime,
     Index,
     Integer,
+    JSON,
     Numeric,
     String,
 )
@@ -291,3 +299,171 @@ class DipPlan(Base):
             f"<DipPlan id={self.id!r} fund_code={self.fund_code!r} "
             f"frequency={self.frequency!r} status={self.status!r}>"
         )
+
+
+# ---------------------------------------------------------------------------
+# 10. FundEstimate — 基金实时估值
+# ---------------------------------------------------------------------------
+
+class FundEstimate(Base):
+    """基金实时估值缓存表。
+
+    复合主键：(fund_code, estimate_date)
+    """
+
+    __tablename__ = "fund_estimate"
+
+    fund_code: Mapped[str] = mapped_column(String(20), primary_key=True)
+    estimate_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    estimate_nav: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(12, 4), nullable=True
+    )
+    estimate_return: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(8, 4), nullable=True
+    )
+    estimate_time: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    source: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<FundEstimate fund_code={self.fund_code!r} date={self.estimate_date}>"
+
+
+# ---------------------------------------------------------------------------
+# 11. FundWatchlist — 自选关注列表
+# ---------------------------------------------------------------------------
+
+class FundWatchlist(Base):
+    """自选基金关注列表。
+
+    主键：id（自增）
+    唯一约束：(fund_code, group_name)
+    """
+
+    __tablename__ = "fund_watchlist"
+    __table_args__ = (
+        Index("uq_watchlist_fund_group", "fund_code", "group_name", unique=True),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    fund_code: Mapped[str] = mapped_column(String(20), nullable=False)
+    fund_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    group_name: Mapped[str] = mapped_column(String(50), nullable=False, default="默认")
+    notes: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    added_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<FundWatchlist fund_code={self.fund_code!r} group={self.group_name!r}>"
+
+
+# ---------------------------------------------------------------------------
+# 12. NotificationConfig — 通知配置
+# ---------------------------------------------------------------------------
+
+class NotificationConfig(Base):
+    """通知渠道配置表。"""
+
+    __tablename__ = "notification_config"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    channel: Mapped[str] = mapped_column(String(20), nullable=False, default="wechat")
+    webhook_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<NotificationConfig channel={self.channel!r} enabled={self.enabled}>"
+
+
+# ---------------------------------------------------------------------------
+# 13. NotificationRule — 通知规则
+# ---------------------------------------------------------------------------
+
+class NotificationRule(Base):
+    """通知规则表。"""
+
+    __tablename__ = "notification_rule"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    rule_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    params: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    def __repr__(self) -> str:
+        return f"<NotificationRule type={self.rule_type!r} enabled={self.enabled}>"
+
+
+# ---------------------------------------------------------------------------
+# 14. FundDividend — 基金分红记录
+# ---------------------------------------------------------------------------
+
+class FundDividend(Base):
+    """基金分红记录表。
+
+    复合主键：(fund_code, ex_date)
+    """
+
+    __tablename__ = "fund_dividend"
+
+    fund_code: Mapped[str] = mapped_column(String(20), primary_key=True)
+    ex_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    dividend_per_unit: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(10, 4), nullable=True
+    )
+    record_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    pay_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    dividend_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<FundDividend fund_code={self.fund_code!r} ex_date={self.ex_date}>"
+
+
+# ---------------------------------------------------------------------------
+# 15. FundFeeSchedule — 基金费率阶梯表
+# ---------------------------------------------------------------------------
+
+class FundFeeSchedule(Base):
+    """基金申购/赎回费率阶梯表。
+
+    主键：id（自增）
+    唯一约束：(fund_code, fee_type, min_holding_days)
+    """
+
+    __tablename__ = "fund_fee_schedule"
+    __table_args__ = (
+        Index("uq_fee_schedule", "fund_code", "fee_type", "min_holding_days", "min_amount", unique=True),
+        Index("ix_fee_fund_type", "fund_code", "fee_type"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    fund_code: Mapped[str] = mapped_column(String(20), nullable=False)
+    fee_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    min_holding_days: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_holding_days: Mapped[int] = mapped_column(Integer, nullable=False, default=999999)
+    fee_rate: Mapped[Decimal] = mapped_column(Numeric(8, 6), nullable=False)
+    min_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    max_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<FundFeeSchedule fund_code={self.fund_code!r} {self.fee_type} rate={self.fee_rate}>"
+
+
+# ---------------------------------------------------------------------------
+# 16. RiskProfile — 风险评估记录
+# ---------------------------------------------------------------------------
+
+class RiskProfile(Base):
+    """用户风险评估记录表。"""
+
+    __tablename__ = "risk_profile"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    risk_level: Mapped[int] = mapped_column(Integer, nullable=False)
+    risk_label: Mapped[str] = mapped_column(String(20), nullable=False)
+    core_ratio: Mapped[int] = mapped_column(Integer, nullable=False)
+    satellite_ratio: Mapped[int] = mapped_column(Integer, nullable=False)
+    assessment_date: Mapped[date] = mapped_column(Date, nullable=False)
+    answers: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<RiskProfile level={self.risk_level} label={self.risk_label!r}>"

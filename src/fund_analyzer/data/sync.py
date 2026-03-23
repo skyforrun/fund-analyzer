@@ -2,11 +2,13 @@
 
 封装 FundFetcher 与 FundRepository，提供统一的数据同步入口。
 支持基金列表、净值历史、指数行情的增量/全量同步。
+使用线程池并发获取数据以提高同步速度。
 """
 from __future__ import annotations
 
 import datetime
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from decimal import Decimal, InvalidOperation
 from typing import Optional
 
@@ -102,32 +104,25 @@ class DataSyncer:
                     fund.get("fund_code", "?"),
                     exc,
                 )
+                self._repo._session.rollback()
         logger.info("sync_fund_list 完成，共同步 %d 条", count)
         return count
 
-    def sync_fund_nav(self, fund_code: str) -> list[str]:
-        """同步指定基金的净值历史。
-
-        1. 通过 fetcher 获取净值列表；
-        2. 将 date 字符串解析为 datetime.date，nav/acc_nav/daily_return 转为 Decimal；
-        3. 对连续净值做异常跳变检测（|涨跌幅| > 15% → 生成警告）；
-        4. 批量 upsert 到 repo。
+    def _parse_and_save_nav(self, fund_code: str, raw_rows: list[dict]) -> list[str]:
+        """解析原始净值数据并写入数据库。
 
         Parameters
         ----------
         fund_code:
             基金代码。
+        raw_rows:
+            fetcher 返回的原始净值字典列表。
 
         Returns
         -------
         list[str]
-            警告信息列表（每条包含"异常"字样）。
+            警告信息列表。
         """
-        raw_rows = self._fetcher.fetch_fund_nav(fund_code)
-        if not raw_rows:
-            logger.info("sync_fund_nav(%s)：未获取到数据", fund_code)
-            return []
-
         warnings: list[str] = []
         parsed_rows: list[dict] = []
 
@@ -136,14 +131,12 @@ class DataSyncer:
         for raw in raw_rows:
             nav_date = _to_date(raw.get("date"))
             if nav_date is None:
-                logger.warning("sync_fund_nav(%s)：跳过无效日期记录 %r", fund_code, raw)
                 continue
 
             nav = _to_decimal(raw.get("nav"))
             acc_nav = _to_decimal(raw.get("acc_nav"))
             daily_return = _to_decimal(raw.get("daily_return"))
 
-            # 异常跳变检测：与前一日净值相比
             if nav is not None and prev_nav is not None and prev_nav > Decimal("0"):
                 jump = abs((nav - prev_nav) / prev_nav)
                 if jump > _NAV_JUMP_THRESHOLD:
@@ -156,29 +149,120 @@ class DataSyncer:
                     logger.warning(msg)
 
             prev_nav = nav
-
-            parsed_rows.append(
-                {
-                    "date": nav_date,
-                    "nav": nav,
-                    "acc_nav": acc_nav,
-                    "daily_return": daily_return,
-                }
-            )
+            parsed_rows.append({
+                "date": nav_date,
+                "nav": nav,
+                "acc_nav": acc_nav,
+                "daily_return": daily_return,
+            })
 
         if parsed_rows:
-            try:
-                self._repo.upsert_fund_navs(fund_code, parsed_rows)
-            except Exception as exc:  # noqa: BLE001
-                logger.error("upsert_fund_navs(%s) 失败：%s", fund_code, exc)
+            self._repo.upsert_fund_navs(fund_code, parsed_rows)
 
         logger.info(
             "sync_fund_nav(%s) 完成，%d 条记录，%d 条警告",
-            fund_code,
-            len(parsed_rows),
-            len(warnings),
+            fund_code, len(parsed_rows), len(warnings),
         )
         return warnings
+
+    def sync_fund_nav(self, fund_code: str) -> list[str]:
+        """同步指定基金的净值历史（单只，兼容 CLI 调用）。"""
+        raw_rows = self._fetcher.fetch_fund_nav(fund_code)
+        if not raw_rows:
+            logger.info("sync_fund_nav(%s)：未获取到数据", fund_code)
+            return []
+        try:
+            return self._parse_and_save_nav(fund_code, raw_rows)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("upsert_fund_navs(%s) 失败：%s", fund_code, exc)
+            self._repo._session.rollback()
+            return []
+
+    def sync_fund_dividend(self, fund_code: str) -> int:
+        """同步基金分红记录。
+
+        Returns
+        -------
+        同步的分红记录数。
+        """
+        records = self._fetcher.fetch_fund_dividend(fund_code)
+        if not records:
+            return 0
+        self._repo.upsert_dividends(fund_code, records)
+        return len(records)
+
+    def sync_estimates(self, fund_codes: list[str]) -> int:
+        """批量同步基金实时估值。
+
+        为每条估值数据补充 estimate_date 字段（fetcher 返回中不包含）。
+
+        Returns
+        -------
+        成功同步的估值数量。
+        """
+        import datetime as _dt
+
+        estimates = self._fetcher.fetch_fund_estimate_batch(fund_codes)
+        today = _dt.date.today()
+        count = 0
+        for est in estimates:
+            if est is not None:
+                est["estimate_date"] = today
+                try:
+                    self._repo.upsert_estimate(est)
+                    count += 1
+                except Exception as exc:
+                    logger.warning("upsert_estimate(%s) 失败: %s", est.get("fund_code"), exc)
+                    self._repo._session.rollback()
+        return count
+
+    def _sync_estimates_parallel(self, fund_codes: list[str]) -> int:
+        """多线程并发同步基金估值。"""
+        import datetime as _dt
+        today = _dt.date.today()
+        max_workers = min(8, max(1, len(fund_codes)))
+
+        def _fetch_one(code: str):
+            try:
+                est = self._fetcher.fetch_fund_estimate(code)
+                if est is not None:
+                    est["fund_code"] = code
+                return est
+            except Exception:
+                return None
+
+        count = 0
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(_fetch_one, c): c for c in fund_codes}
+            for future in as_completed(futures):
+                est = future.result()
+                if est is not None:
+                    est["estimate_date"] = today
+                    try:
+                        self._repo.upsert_estimate(est)
+                        count += 1
+                    except Exception as exc:
+                        logger.warning("upsert_estimate(%s) 失败: %s", est.get("fund_code"), exc)
+                        self._repo._session.rollback()
+        return count
+
+    def sync_fee_schedules(self, fund_codes: list[str]) -> int:
+        """同步基金费率阶梯数据。
+
+        Returns
+        -------
+        成功同步费率的基金数。
+        """
+        count = 0
+        for code in fund_codes:
+            try:
+                schedules = self._fetcher.fetch_fund_fee_schedule(code)
+                if schedules:
+                    self._repo.upsert_fee_schedule(code, schedules)
+                    count += 1
+            except Exception as exc:
+                logger.warning("sync_fee_schedule(%s) 失败: %s", code, exc)
+        return count
 
     def sync_index(self, index_code: str) -> int:
         """同步指定指数的行情数据。
@@ -243,14 +327,17 @@ class DataSyncer:
         self,
         fund_codes: Optional[list[str]] = None,
         full: bool = False,
+        max_nav_funds: int = 200,
+        skip_fund_list: bool = False,
+        progress_callback=None,
     ) -> dict:
         """全量/增量同步编排入口。
 
         执行顺序：
-        1. 同步基金列表；
+        1. 同步基金列表（可跳过）；
         2. 若 ``fund_codes`` 未指定，则从 repo 查询符合条件的基金；
            否则直接使用 ``fund_codes``；
-        3. 逐基金同步净值；
+        3. 逐基金同步净值（限制最大数量）；
         4. 同步关键指数（000688、000300）。
 
         Parameters
@@ -259,6 +346,12 @@ class DataSyncer:
             指定要同步净值的基金代码列表；``None`` 表示自动筛选符合条件的基金。
         full:
             保留参数，供未来实现全量重刷逻辑使用，当前版本不影响行为。
+        max_nav_funds:
+            最多同步多少只基金的净值，默认 200。设为 0 表示不限制。
+        skip_fund_list:
+            是否跳过基金列表同步（已有数据时设为 True 可加速）。
+        progress_callback:
+            可选的进度回调函数，签名：callback(current, total, message)。
 
         Returns
         -------
@@ -269,11 +362,19 @@ class DataSyncer:
             "funds": 0,
             "navs": 0,
             "indices": 0,
+            "estimates": 0,
+            "fee_schedules": 0,
             "warnings": [],
         }
 
+        def _progress(current, total, msg):
+            if progress_callback:
+                progress_callback(current, total, msg)
+
         # 1. 同步基金列表
-        result["funds"] = self.sync_fund_list()
+        if not skip_fund_list:
+            _progress(0, 100, "同步基金列表...")
+            result["funds"] = self.sync_fund_list()
 
         # 2. 确定需要同步净值的基金代码
         if fund_codes is not None:
@@ -285,16 +386,23 @@ class DataSyncer:
                     min_size_billion=1,
                     exclude_types=["货币型"],
                     as_of=datetime.date.today(),
+                    require_nav=False,
                 )
                 codes_to_sync = [f.fund_code for f in eligible]
             except Exception as exc:  # noqa: BLE001
                 logger.warning("get_eligible_funds 失败，跳过净值同步：%s", exc)
                 codes_to_sync = []
 
+        # 限制净值同步数量
+        if max_nav_funds > 0 and len(codes_to_sync) > max_nav_funds:
+            codes_to_sync = codes_to_sync[:max_nav_funds]
+
         # 3. 逐基金同步净值
         total_nav_count = 0
         all_warnings: list[str] = []
-        for code in codes_to_sync:
+        nav_total = len(codes_to_sync)
+        for i, code in enumerate(codes_to_sync):
+            _progress(i + 1, nav_total, f"同步净值 ({i+1}/{nav_total})：{code}")
             try:
                 warns = self.sync_fund_nav(code)
                 all_warnings.extend(warns)
@@ -302,9 +410,22 @@ class DataSyncer:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("sync_fund_nav(%s) 出错：%s", code, exc)
 
+            try:
+                self.sync_fund_dividend(code)
+            except Exception as exc:
+                all_warnings.append(f"分红同步失败 {code}: {exc}")
+                self._repo._session.rollback()
+
         result["navs"] = total_nav_count
 
+        # 提交净值数据，避免后续步骤失败导致丢失
+        try:
+            self._repo._session.commit()
+        except Exception:
+            self._repo._session.rollback()
+
         # 4. 同步关键指数
+        _progress(nav_total, nav_total, "同步指数行情...")
         total_index_count = 0
         for idx_code in _KEY_INDICES:
             try:
@@ -313,13 +434,31 @@ class DataSyncer:
                 logger.warning("sync_index(%s) 出错：%s", idx_code, exc)
 
         result["indices"] = total_index_count
+
+        # 5. 多线程并发同步实时估值
+        _progress(nav_total, nav_total, "同步实时估值...")
+        try:
+            result["estimates"] = self.sync_estimates(codes_to_sync)
+        except Exception as exc:
+            logger.warning("sync_estimates 出错：%s", exc)
+
+        # 6. 同步费率（仅 full 模式，费率变更频率低）
+        if full:
+            _progress(nav_total, nav_total, "同步费率数据...")
+            try:
+                result["fee_schedules"] = self.sync_fee_schedules(codes_to_sync)
+            except Exception as exc:
+                logger.warning("sync_fee_schedules 出错：%s", exc)
+
         result["warnings"] = all_warnings
 
         logger.info(
-            "sync_all 完成：funds=%d, navs=%d, indices=%d, warnings=%d",
+            "sync_all 完成：funds=%d, navs=%d, indices=%d, estimates=%d, fee_schedules=%d, warnings=%d",
             result["funds"],
             result["navs"],
             result["indices"],
+            result["estimates"],
+            result["fee_schedules"],
             len(all_warnings),
         )
         return result

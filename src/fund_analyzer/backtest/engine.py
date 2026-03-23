@@ -98,6 +98,20 @@ class BacktestEngine:
             current = current + relativedelta(months=months)
         return dates
 
+    def _get_sell_fee_rate(self, fund_code: str, holding_days: int) -> float:
+        """获取卖出费率，优先查数据库，无数据时使用默认值。"""
+        rate = self._repo.get_fee_rate(fund_code, "redemption", holding_days=holding_days)
+        if rate is not None:
+            return float(rate)
+        return self.sell_fee
+
+    def _get_buy_fee_rate(self, fund_code: str, amount: float) -> float:
+        """获取买入费率，优先查数据库，无数据时使用默认值。"""
+        rate = self._repo.get_fee_rate(fund_code, "purchase", amount=amount)
+        if rate is not None:
+            return float(rate)
+        return self.buy_fee
+
     def _get_daily_return(self, fund_code: str, d: date) -> float:
         """获取指定基金在某日的日收益率。
 
@@ -189,9 +203,9 @@ class BacktestEngine:
         )
 
         # 3. 初始化持仓和资金追踪
-        # holdings 格式：{fund_code: current_value}
-        core_holdings: dict[str, float] = {}
-        sat_holdings: dict[str, float] = {}
+        # holdings 格式：{fund_code: [current_value, buy_date]}
+        core_holdings: dict[str, list] = {}
+        sat_holdings: dict[str, list] = {}
         total_fees_paid: float = 0.0
 
         # 初始分配资金
@@ -212,8 +226,11 @@ class BacktestEngine:
             if d in core_rebalance_dates:
                 # 卖出所有核心持仓
                 sell_proceeds = 0.0
-                for fund_code, value in core_holdings.items():
-                    fee = value * self.sell_fee
+                for fund_code, holding in core_holdings.items():
+                    value, buy_date = holding[0], holding[1]
+                    holding_days = (d - buy_date).days
+                    fee_rate = self._get_sell_fee_rate(fund_code, holding_days)
+                    fee = value * fee_rate
                     total_fees_paid += fee
                     sell_proceeds += value - fee
                 core_holdings = {}
@@ -233,9 +250,10 @@ class BacktestEngine:
                 if core_picks:
                     per_fund_capital = sell_proceeds / len(core_picks)
                     for fund_code, _score in core_picks:
-                        fee = per_fund_capital * self.buy_fee
+                        fee_rate = self._get_buy_fee_rate(fund_code, per_fund_capital)
+                        fee = per_fund_capital * fee_rate
                         total_fees_paid += fee
-                        core_holdings[fund_code] = per_fund_capital - fee
+                        core_holdings[fund_code] = [per_fund_capital - fee, d]
                 else:
                     # 无推荐标的，资金暂存（不买入）
                     core_capital = sell_proceeds
@@ -244,8 +262,11 @@ class BacktestEngine:
             if d in satellite_rebalance_dates:
                 # 卖出所有卫星持仓
                 sell_proceeds = 0.0
-                for fund_code, value in sat_holdings.items():
-                    fee = value * self.sell_fee
+                for fund_code, holding in sat_holdings.items():
+                    value, buy_date = holding[0], holding[1]
+                    holding_days = (d - buy_date).days
+                    fee_rate = self._get_sell_fee_rate(fund_code, holding_days)
+                    fee = value * fee_rate
                     total_fees_paid += fee
                     sell_proceeds += value - fee
                 sat_holdings = {}
@@ -271,25 +292,26 @@ class BacktestEngine:
 
                     for (fund_code, _score), weight in zip(sat_picks, weights):
                         alloc = sell_proceeds * weight
-                        fee = alloc * self.buy_fee
+                        fee_rate = self._get_buy_fee_rate(fund_code, alloc)
+                        fee = alloc * fee_rate
                         total_fees_paid += fee
-                        sat_holdings[fund_code] = alloc - fee
+                        sat_holdings[fund_code] = [alloc - fee, d]
                 else:
                     sat_capital = sell_proceeds
 
             # ---- 每日更新持仓市值 ----
             for fund_code in list(core_holdings.keys()):
                 daily_ret = self._get_daily_return(fund_code, d)
-                core_holdings[fund_code] *= (1 + daily_ret)
+                core_holdings[fund_code][0] *= (1 + daily_ret)
 
             for fund_code in list(sat_holdings.keys()):
                 daily_ret = self._get_daily_return(fund_code, d)
-                sat_holdings[fund_code] *= (1 + daily_ret)
+                sat_holdings[fund_code][0] *= (1 + daily_ret)
 
             # ---- 计算当日总净值 ----
             # 未投资部分：初始资金减去已实际投入的部分
-            core_invested = sum(core_holdings.values())
-            sat_invested = sum(sat_holdings.values())
+            core_invested = sum(h[0] for h in core_holdings.values())
+            sat_invested = sum(h[0] for h in sat_holdings.values())
 
             # 未投入的现金（首次调仓前或无推荐时）
             uninvested_core = core_capital if not core_holdings else 0.0

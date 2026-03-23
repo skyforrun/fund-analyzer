@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(poetry run:*)",
+      "Bash(npm run:*)",
+      "Bash(ls -1 /d/pycharmWorkspace/finance/src/fund_analyzer/api/routers/*.py)",
+      "Bash(ls -1 /d/pycharmWorkspace/finance/src/fund_analyzer/api/schemas/*.py)",
+      "Bash(ls -1 /d/pycharmWorkspace/finance/tests/test_api_*.py)"
+    ]
+  }
+}
